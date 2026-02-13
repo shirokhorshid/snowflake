@@ -134,6 +134,15 @@ type SnowflakeProxy struct {
 	// The limit is shared fairly: each client gets globalLimit / numClients.
 	// A value of 0 means unlimited (no bandwidth limiting).
 	Bandwidth int64
+	// TrafficLimit is the maximum total bytes (up + down combined) the proxy
+	// will transfer before automatically shutting down. Designed for VPS
+	// operators with monthly bandwidth quotas (e.g., 20 TB included).
+	// A value of 0 means unlimited (no traffic quota).
+	TrafficLimit int64
+	// TrafficStateFile is the path to a JSON file where traffic usage state
+	// is persisted across restarts. If empty, state is not persisted and the
+	// counter resets on each restart.
+	TrafficStateFile string
 	// STUNURL is the URLs (comma-separated) of the STUN server the proxy will use
 	STUNURL string
 	// BrokerURL is the URL of the Snowflake broker
@@ -187,6 +196,7 @@ type SnowflakeProxy struct {
 	bytesLogger        bytesLogger
 
 	bandwidthManager *BandwidthManager
+	trafficQuota     *TrafficQuota
 
 	relayReachable bool
 }
@@ -320,7 +330,7 @@ func (s *SignalingServer) sendAnswer(sid string, pc *webrtc.PeerConnection) erro
 	return nil
 }
 
-func copyLoop(c1 io.ReadWriteCloser, c2 io.ReadWriteCloser, shutdown chan struct{}, limiter *ClientLimiter) {
+func copyLoop(c1 io.ReadWriteCloser, c2 io.ReadWriteCloser, shutdown chan struct{}, limiter *ClientLimiter, quota *TrafficQuota) {
 	var once sync.Once
 	defer c2.Close()
 	defer c1.Close()
@@ -334,7 +344,11 @@ func copyLoop(c1 io.ReadWriteCloser, c2 io.ReadWriteCloser, shutdown chan struct
 		// Ignore io.ErrClosedPipe because it is likely caused by the
 		// termination of copyer in the other direction.
 		if _, err := io.CopyBuffer(dst, src, buffer); err != nil && err != io.ErrClosedPipe {
-			log.Printf("io.CopyBuffer inside CopyLoop generated an error: %v", err)
+			if err == ErrQuotaExhausted {
+				log.Printf("Connection closed: traffic quota exhausted")
+			} else {
+				log.Printf("io.CopyBuffer inside CopyLoop generated an error: %v", err)
+			}
 		}
 		once.Do(func() {
 			close(done)
@@ -347,10 +361,17 @@ func copyLoop(c1 io.ReadWriteCloser, c2 io.ReadWriteCloser, shutdown chan struct
 	var dst2 io.Writer = c1
 
 	if limiter != nil {
-		src1 = limiter.LimitReader(c1)
-		dst1 = limiter.LimitWriter(c2)
-		src2 = limiter.LimitReader(c2)
-		dst2 = limiter.LimitWriter(c1)
+		src1 = limiter.LimitReader(src1)
+		dst1 = limiter.LimitWriter(dst1)
+		src2 = limiter.LimitReader(src2)
+		dst2 = limiter.LimitWriter(dst2)
+	}
+
+	if quota != nil {
+		src1 = quota.CountingReader(src1)
+		dst1 = quota.CountingWriter(dst1)
+		src2 = quota.CountingReader(src2)
+		dst2 = quota.CountingWriter(dst2)
 	}
 
 	go copyer(dst1, src1)
@@ -371,6 +392,12 @@ func (sf *SnowflakeProxy) datachannelHandler(conn *webRTCConn, remoteIP net.IP, 
 	defer conn.Close()
 	defer tokens.ret()
 
+	// Reject new connections if traffic quota is exhausted
+	if sf.trafficQuota != nil && !sf.trafficQuota.Allow() {
+		log.Printf("Traffic quota exhausted, rejecting new connection")
+		return
+	}
+
 	if relayURL == "" {
 		relayURL = sf.RelayURL
 	}
@@ -388,7 +415,7 @@ func (sf *SnowflakeProxy) datachannelHandler(conn *webRTCConn, remoteIP net.IP, 
 		defer sf.bandwidthManager.RemoveClient(limiter)
 	}
 
-	copyLoop(conn, wsConn, sf.shutdown, limiter)
+	copyLoop(conn, wsConn, sf.shutdown, limiter, sf.trafficQuota)
 	log.Printf("datachannelHandler ends")
 }
 
@@ -812,6 +839,22 @@ func (sf *SnowflakeProxy) Start() error {
 	if sf.Bandwidth > 0 {
 		sf.bandwidthManager = NewBandwidthManager(sf.Bandwidth)
 		log.Printf("Bandwidth limiting enabled: %d bytes/sec shared across all clients", sf.Bandwidth)
+	}
+
+	if sf.TrafficLimit > 0 {
+		var err error
+		sf.trafficQuota, err = NewTrafficQuota(sf.TrafficLimit, sf.TrafficStateFile, sf.Stop)
+		if err != nil {
+			return fmt.Errorf("error initializing traffic quota: %s", err)
+		}
+		log.Printf("Traffic quota enabled: %s total limit", formatBytes(sf.TrafficLimit))
+		if sf.TrafficStateFile != "" {
+			log.Printf("Traffic quota state file: %s", sf.TrafficStateFile)
+		}
+		remaining := sf.trafficQuota.RemainingBytes()
+		if remaining < sf.TrafficLimit {
+			log.Printf("Traffic quota: %s remaining", formatBytes(remaining))
+		}
 	}
 
 	broker, err = newSignalingServer(sf.BrokerURL)
