@@ -193,6 +193,18 @@ func main() {
 	if *enableMetrics {
 		metrics := sf.NewMetrics()
 
+		metrics.SetSources(&sf.MetricsSources{
+			NATType:              sf.GetCurrentNATType,
+			BandwidthBytesPerSec: func() int64 { return proxy.Bandwidth },
+			TrafficQuotaBytes:    func() int64 { return proxy.TrafficLimit },
+			TrafficUsedBytes: func() int64 {
+				if proxy.GetTrafficQuota() != nil {
+					return proxy.GetTrafficQuota().UsedBytes()
+				}
+				return 0
+			},
+		})
+
 		err := metrics.Start(net.JoinHostPort(*metricsAddress, strconv.Itoa(*metricsPort)))
 		if err != nil {
 			log.Fatalf("could not enable metrics: %v", err)
