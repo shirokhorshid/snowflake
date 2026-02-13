@@ -9,6 +9,9 @@ type EventCollector interface {
 	TrackOutBoundTraffic(value int64)
 	TrackNewConnection(country string)
 	TrackFailedConnection()
+	TrackClientConnected()
+	TrackClientDisconnected()
+	ObserveConnectionDuration(seconds float64)
 }
 
 type EventMetrics struct {
@@ -25,10 +28,16 @@ func (em *EventMetrics) OnNewSnowflakeEvent(e event.SnowflakeEvent) {
 		e := e.(event.EventOnProxyStats)
 		em.collector.TrackInBoundTraffic(e.InboundBytes)
 		em.collector.TrackOutBoundTraffic(e.OutboundBytes)
+	case event.EventOnProxyClientConnected:
+		em.collector.TrackClientConnected()
 	case event.EventOnProxyConnectionOver:
 		e := e.(event.EventOnProxyConnectionOver)
 		em.collector.TrackNewConnection(e.Country)
+		em.collector.TrackClientDisconnected()
 	case event.EventOnProxyConnectionFailed:
 		em.collector.TrackFailedConnection()
+	case event.EventOnProxyConnectionDuration:
+		e := e.(event.EventOnProxyConnectionDuration)
+		em.collector.ObserveConnectionDuration(e.Duration)
 	}
 }

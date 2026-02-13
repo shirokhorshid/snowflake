@@ -104,6 +104,11 @@ func getCurrentNATType() string {
 	return currentNATType
 }
 
+// GetCurrentNATType returns the current NAT type string for external consumers (e.g., metrics).
+func GetCurrentNATType() string {
+	return getCurrentNATType()
+}
+
 func setCurrentNATType(newType string) {
 	currentNATTypeAccess.Lock()
 	defer currentNATTypeAccess.Unlock()
@@ -199,6 +204,11 @@ type SnowflakeProxy struct {
 	trafficQuota     *TrafficQuota
 
 	relayReachable bool
+}
+
+// GetTrafficQuota returns the proxy's TrafficQuota instance, or nil if quota is not enabled.
+func (sf *SnowflakeProxy) GetTrafficQuota() *TrafficQuota {
+	return sf.trafficQuota
 }
 
 // Checks whether an IP address is a remote address for the client
@@ -523,6 +533,7 @@ func (sf *SnowflakeProxy) makePeerConnectionFromOffer(
 		pr, pw := io.Pipe()
 		conn := newWebRTCConn(pc, dc, pr, sf.bytesLogger)
 		remoteIP := conn.RemoteIP()
+		var connectedAt time.Time
 
 		dc.SetBufferedAmountLowThreshold(bufferedAmountLowThreshold)
 
@@ -534,6 +545,7 @@ func (sf *SnowflakeProxy) makePeerConnectionFromOffer(
 		})
 
 		dc.OnOpen(func() {
+			connectedAt = time.Now()
 			log.Printf("Data Channel %s-%d open\n", dc.Label(), dc.ID())
 			sf.EventDispatcher.OnNewSnowflakeEvent(event.EventOnProxyClientConnected{})
 
@@ -563,6 +575,11 @@ func (sf *SnowflakeProxy) makePeerConnectionFromOffer(
 				country, _ = sf.GeoIP.GetCountryByAddr(remoteIP)
 			}
 			sf.EventDispatcher.OnNewSnowflakeEvent(event.EventOnProxyConnectionOver{Country: country})
+
+			if !connectedAt.IsZero() {
+				duration := time.Since(connectedAt).Seconds()
+				sf.EventDispatcher.OnNewSnowflakeEvent(event.EventOnProxyConnectionDuration{Duration: duration})
+			}
 
 			conn.dc = nil
 			dc.Close()

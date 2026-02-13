@@ -96,6 +96,16 @@ func (e EventOnProxyConnectionFailed) String() string {
 	return "Failed to connect to the client"
 }
 
+// A proxy client connection has ended and we know its duration.
+type EventOnProxyConnectionDuration struct {
+	SnowflakeEvent
+	Duration float64 // seconds
+}
+
+func (e EventOnProxyConnectionDuration) String() string {
+	return fmt.Sprintf("Proxy connection lasted %.1f seconds", e.Duration)
+}
+
 type EventOnProxyStats struct {
 	SnowflakeEvent
 	// Completed successful connections.
