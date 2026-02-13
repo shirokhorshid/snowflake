@@ -477,7 +477,7 @@ func TestUtilityFuncs(t *testing.T) {
 	Convey("CopyLoop", t, func() {
 		c1, s1 := net.Pipe()
 		c2, s2 := net.Pipe()
-		go copyLoop(s1, s2, nil)
+		go copyLoop(s1, s2, nil, nil)
 		go func() {
 			bytes := []byte("Hello!")
 			c1.Write(bytes)

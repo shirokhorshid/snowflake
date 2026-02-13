@@ -129,6 +129,11 @@ type SnowflakeProxy struct {
 	// Capacity is the maximum number of clients a Snowflake will serve.
 	// Proxies with a capacity of 0 will accept an unlimited number of clients.
 	Capacity uint
+	// Bandwidth is the maximum total bandwidth (in bytes per second) that
+	// the proxy will consume across all client connections combined.
+	// The limit is shared fairly: each client gets globalLimit / numClients.
+	// A value of 0 means unlimited (no bandwidth limiting).
+	Bandwidth int64
 	// STUNURL is the URLs (comma-separated) of the STUN server the proxy will use
 	STUNURL string
 	// BrokerURL is the URL of the Snowflake broker
@@ -180,6 +185,8 @@ type SnowflakeProxy struct {
 
 	periodicProxyStats *periodicProxyStats
 	bytesLogger        bytesLogger
+
+	bandwidthManager *BandwidthManager
 
 	relayReachable bool
 }
@@ -313,12 +320,12 @@ func (s *SignalingServer) sendAnswer(sid string, pc *webrtc.PeerConnection) erro
 	return nil
 }
 
-func copyLoop(c1 io.ReadWriteCloser, c2 io.ReadWriteCloser, shutdown chan struct{}) {
+func copyLoop(c1 io.ReadWriteCloser, c2 io.ReadWriteCloser, shutdown chan struct{}, limiter *ClientLimiter) {
 	var once sync.Once
 	defer c2.Close()
 	defer c1.Close()
 	done := make(chan struct{})
-	copyer := func(dst io.ReadWriteCloser, src io.ReadWriteCloser) {
+	copyer := func(dst io.Writer, src io.Reader) {
 		// Experimentally each usage of buffer has been observed to be lower than
 		// 2K; io.Copy defaults to 32K.
 		// This is probably determined by MTU in the server's `newHTTPHandler`.
@@ -334,8 +341,20 @@ func copyLoop(c1 io.ReadWriteCloser, c2 io.ReadWriteCloser, shutdown chan struct
 		})
 	}
 
-	go copyer(c1, c2)
-	go copyer(c2, c1)
+	var src1 io.Reader = c1
+	var dst1 io.Writer = c2
+	var src2 io.Reader = c2
+	var dst2 io.Writer = c1
+
+	if limiter != nil {
+		src1 = limiter.LimitReader(c1)
+		dst1 = limiter.LimitWriter(c2)
+		src2 = limiter.LimitReader(c2)
+		dst2 = limiter.LimitWriter(c1)
+	}
+
+	go copyer(dst1, src1)
+	go copyer(dst2, src2)
 
 	select {
 	case <-done:
@@ -363,7 +382,13 @@ func (sf *SnowflakeProxy) datachannelHandler(conn *webRTCConn, remoteIP net.IP, 
 	}
 	defer wsConn.Close()
 
-	copyLoop(conn, wsConn, sf.shutdown)
+	var limiter *ClientLimiter
+	if sf.bandwidthManager != nil {
+		limiter = sf.bandwidthManager.AddClient()
+		defer sf.bandwidthManager.RemoveClient(limiter)
+	}
+
+	copyLoop(conn, wsConn, sf.shutdown, limiter)
 	log.Printf("datachannelHandler ends")
 }
 
@@ -784,6 +809,11 @@ func (sf *SnowflakeProxy) Start() error {
 	sf.periodicProxyStats = newPeriodicProxyStats(sf.SummaryInterval, sf.EventDispatcher, sf.bytesLogger)
 	sf.EventDispatcher.AddSnowflakeEventListener(sf.periodicProxyStats)
 
+	if sf.Bandwidth > 0 {
+		sf.bandwidthManager = NewBandwidthManager(sf.Bandwidth)
+		log.Printf("Bandwidth limiting enabled: %d bytes/sec shared across all clients", sf.Bandwidth)
+	}
+
 	broker, err = newSignalingServer(sf.BrokerURL)
 	if err != nil {
 		return fmt.Errorf("error configuring broker: %s", err)
@@ -838,7 +868,7 @@ func (sf *SnowflakeProxy) Start() error {
 	err = sf.checkNATType(config, sf.NATProbeURL)
 	if err != nil {
 		// non-fatal error. Log it and continue
-		log.Printf(err.Error())
+		log.Printf("%s", err.Error())
 		setCurrentNATType(NATUnknown)
 	}
 	sf.EventDispatcher.OnNewSnowflakeEvent(event.EventOnCurrentNATTypeDetermined{CurNATType: getCurrentNATType()})
