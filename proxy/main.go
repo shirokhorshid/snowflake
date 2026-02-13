@@ -28,6 +28,8 @@ func main() {
 		fmt.Sprint("how often to ask the broker for a new client. Keep in mind that asking for a client will not always result in getting one. Minumum value is ", minPollInterval, ". Valid time units are \"ms\", \"s\", \"m\", \"h\"."))
 	capacity := flag.Uint("capacity", 0, "maximum concurrent clients (default is to accept an unlimited number of clients)")
 	bandwidthMbps := flag.Float64("bandwidth", 0, "maximum total bandwidth in Mbps shared across all clients. Each client gets an equal share (totalBandwidth / numClients). 0 means unlimited.")
+	trafficLimitGB := flag.Float64("traffic-limit", 0, "maximum total traffic (upload + download combined) in GB before the proxy auto-stops. Useful for VPS with included bandwidth quotas (e.g., --traffic-limit 20000 for 20 TB). 0 means unlimited.")
+	trafficStateFile := flag.String("traffic-state-file", "", "path to a JSON `file` where traffic usage is persisted across restarts. If not set, the traffic counter resets on each restart.")
 	stunURL := flag.String("stun", sf.DefaultSTUNURL, "Comma-separated STUN server `URL`s that this proxy will use will use to, among some other things, determine its public IP address")
 	logFilename := flag.String("log", "", "log `filename`. If not specified, logs will be output to stderr (console).")
 	rawBrokerURL := flag.String("broker", sf.DefaultBrokerURL, "The `URL` of the broker server that the proxy will be using to find clients")
@@ -71,6 +73,10 @@ func main() {
 
 	if *bandwidthMbps < 0 {
 		log.Fatal("bandwidth must be >= 0")
+	}
+
+	if *trafficLimitGB < 0 {
+		log.Fatal("traffic-limit must be >= 0")
 	}
 
 	if *outboundAddress != "" && *keepLocalAddresses {
@@ -123,7 +129,9 @@ func main() {
 	proxy := sf.SnowflakeProxy{
 		PollInterval:       *pollInterval,
 		Capacity:           uint(*capacity),
-		Bandwidth:          int64(*bandwidthMbps * 1000 * 1000 / 8), // Convert Mbps to bytes/sec
+		Bandwidth:          int64(*bandwidthMbps * 1000 * 1000 / 8),     // Convert Mbps to bytes/sec
+		TrafficLimit:       int64(*trafficLimitGB * 1000 * 1000 * 1000), // Convert GB to bytes
+		TrafficStateFile:   *trafficStateFile,
 		STUNURL:            *stunURL,
 		BrokerURL:          *rawBrokerURL,
 		KeepLocalAddresses: *keepLocalAddresses,
